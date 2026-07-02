@@ -40,6 +40,7 @@ export type AccountDetailProps = {
     routingPolicy: AccountRoutingPolicy,
   ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onEditOpenAICompatible?: (account: AccountSummary) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
   resetCredits?: AccountUsageResetCredits | null;
@@ -64,6 +65,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
+  onEditOpenAICompatible,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
   resetCredits = null,
@@ -140,6 +142,19 @@ export function AccountDetail({
         <p className="mt-0.5 text-xs text-muted-foreground">
           {workspaceLabel} | {formatSlug(account.planType)}{seatLabel}
         </p>
+        {account.provider === "openai_compatible" && onEditOpenAICompatible ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            disabled={busy || readOnly}
+            onClick={() => onEditOpenAICompatible(account)}
+          >
+            <Pencil className="mr-2 size-3.5" />
+            Edit provider
+          </Button>
+        ) : null}
       </div>
 
       {onProxyBindingSave ? (

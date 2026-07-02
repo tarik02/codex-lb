@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
 
 import aiohttp
 import anyio
+from sqlalchemy import select
 
 from app.core.auth.refresh import (
     RefreshError,
@@ -114,6 +115,7 @@ from app.modules.api_keys.service import (
 from app.modules.api_keys.service import (
     ApiKeysService as ApiKeysService,
 )
+from app.modules.proxy import openai_compatible_upstream
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1396,6 +1398,8 @@ class ProxyService(
         force: bool = False,
         timeout_seconds: float | None = None,
     ) -> Account:
+        if account.provider == "openai_compatible":
+            return account
         token = push_token_refresh_timeout_override(timeout_seconds)
         try:
             async with self._repo_factory() as repos:
@@ -1732,6 +1736,37 @@ class ProxyService(
                             error_message="Preferred account is not available",
                             error_code="preferred_account_unavailable",
                         )
+                provider_account_ids = await _openai_compatible_account_ids_for_model(model)
+                if provider_account_ids:
+                    scoped_account_ids = (
+                        provider_account_ids
+                        if scoped_account_ids is None
+                        else scoped_account_ids & provider_account_ids
+                    )
+                    provider_candidates = scoped_account_ids - excluded_account_ids_set
+                    if not provider_candidates:
+                        return AccountSelection(
+                            account=None,
+                            error_message="No matching OpenAI-compatible accounts available",
+                            error_code="no_accounts",
+                        )
+                    provider_account = await _openai_compatible_account_by_id(next(iter(sorted(provider_candidates))))
+                    if provider_account is None:
+                        return AccountSelection(
+                            account=None,
+                            error_message="No matching OpenAI-compatible accounts available",
+                            error_code="no_accounts",
+                        )
+                    logger.info(
+                        "Selected OpenAI-compatible account request_id=%s kind=%s request_stage=%s "
+                        "account_id=%s model=%s",
+                        request_id,
+                        kind,
+                        request_stage,
+                        provider_account.id,
+                        model,
+                    )
+                    return AccountSelection(account=provider_account, error_message=None, error_code=None)
                 if preferred_eligible:
                     preferred_selection = await self._load_balancer.select_account(
                         sticky_key=sticky_key,
@@ -2232,6 +2267,68 @@ def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSetti
 
 def _remaining_budget_seconds(deadline: float) -> float:
     return max(0.0, deadline - time.monotonic())
+
+
+async def _openai_compatible_account_ids_for_model(model: str | None) -> set[str]:
+    if not model:
+        return set()
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Account.id, Account.provider_base_url, Account.provider_model_prefix, Account.access_token_encrypted)
+            .where(Account.provider == "openai_compatible")
+            .where(Account.status == AccountStatus.ACTIVE)
+        )
+        account_ids: set[str] = set()
+        encryptor = TokenEncryptor()
+        for account_id, base_url, model_prefix, access_token_encrypted in result.all():
+            if not base_url or not access_token_encrypted:
+                continue
+            requested_model = openai_compatible_upstream.openai_compatible_upstream_model(
+                model,
+                model_prefix=model_prefix,
+            )
+            if not requested_model:
+                continue
+            try:
+                api_key = encryptor.decrypt(access_token_encrypted)
+            except Exception:
+                logger.warning("Unable to decrypt OpenAI-compatible account key account_id=%s", account_id)
+                continue
+            provider_models = await openai_compatible_upstream.fetch_openai_compatible_models(
+                api_key=api_key,
+                base_url=base_url,
+                owned_by=f"openai-compatible:{account_id}",
+            )
+            upstream_models = {item.id for item in provider_models}
+            display_models = {
+                display_model
+                for item in provider_models
+                if (
+                    display_model := openai_compatible_upstream.openai_compatible_display_model(
+                        item.id,
+                        upstream_models,
+                        model_prefix=model_prefix,
+                    )
+                )
+            }
+            requested_display_model = model.strip()
+            if requested_display_model in display_models or (
+                not openai_compatible_upstream.normalize_openai_compatible_model_prefix(model_prefix)
+                and requested_model in upstream_models
+            ):
+                account_ids.add(account_id)
+        return account_ids
+
+
+async def _openai_compatible_account_by_id(account_id: str) -> Account | None:
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Account)
+            .where(Account.id == account_id)
+            .where(Account.provider == "openai_compatible")
+            .where(Account.status == AccountStatus.ACTIVE)
+        )
+        return result.scalar_one_or_none()
 
 
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:

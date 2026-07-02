@@ -235,6 +235,9 @@ def _account_to_summary(
     return AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
+        provider=account.provider,
+        provider_base_url=account.provider_base_url,
+        provider_model_prefix=account.provider_model_prefix,
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,

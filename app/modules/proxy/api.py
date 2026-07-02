@@ -74,7 +74,12 @@ from app.core.openai.chat_responses import (
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.images import V1ImageResponse, V1ImagesEditsForm, V1ImagesGenerationsRequest
-from app.core.openai.model_registry import UpstreamModel, get_model_registry, is_public_model
+from app.core.openai.model_registry import (
+    ReasoningLevel,
+    UpstreamModel,
+    get_model_registry,
+    is_public_model,
+)
 from app.core.openai.models import (
     CompactResponsePayload,
     CompactResponseResult,
@@ -123,6 +128,7 @@ from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
+from app.modules.proxy import openai_compatible_upstream
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
@@ -719,6 +725,13 @@ async def v1_responses_websocket(
 
 @router.get("/models", response_model=CodexModelsResponse)
 async def models(
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _build_codex_models_response(api_key)
+
+
+@usage_router.get("/models", response_model=CodexModelsResponse)
+async def public_models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_codex_models_response(api_key)
@@ -2050,10 +2063,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
-
-    if not models:
-        await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
+    created = int(time.time())
 
     entries: list[CodexModelEntry] = []
     data: list[ModelListItem] = []
@@ -2075,6 +2085,22 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         entries.append(entry)
         if entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
+    provider_entries, provider_data, provider_codex_catalog_found = await _openai_compatible_codex_catalog_items(
+        api_key,
+        seen_ids={entry.slug for entry in entries},
+    )
+    if provider_codex_catalog_found:
+        entries.extend(provider_entries)
+        data.extend(provider_data)
+    else:
+        provider_items = await _openai_compatible_model_items(
+            api_key,
+            created=created,
+            seen_ids={entry.slug for entry in entries},
+        )
+        for item in provider_items:
+            entries.append(_openai_compatible_codex_model_entry(item))
+            data.append(item)
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
@@ -2092,17 +2118,213 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
 
-    if not models:
-        await _release_reservation(reservation)
-        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
-
     items: list[ModelListItem] = []
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
         items.append(_to_model_list_item(slug, model, created=created))
+    items.extend(
+        await _openai_compatible_model_items(
+            api_key,
+            created=created,
+            seen_ids={item.id for item in items},
+        )
+    )
     await _release_reservation(reservation)
     return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+async def _openai_compatible_model_items(
+    api_key: ApiKeyData | None,
+    *,
+    created: int,
+    seen_ids: set[str] | None = None,
+) -> list[ModelListItem]:
+    allowed_models = _allowed_models_for_api_key(api_key)
+    seen: set[str] = set(seen_ids or set())
+    items: list[ModelListItem] = []
+    encryptor = TokenEncryptor()
+    async with get_background_session() as session:
+        result = await session.execute(
+            select(Account.id, Account.provider_base_url, Account.provider_model_prefix, Account.access_token_encrypted)
+            .where(Account.provider == "openai_compatible")
+            .where(Account.status == AccountStatus.ACTIVE)
+        )
+        for account_id, base_url, model_prefix, access_token_encrypted in result.all():
+            if not base_url or not access_token_encrypted:
+                continue
+            try:
+                provider_api_key = encryptor.decrypt(access_token_encrypted)
+            except Exception:
+                logger.warning("Unable to decrypt OpenAI-compatible account key account_id=%s", account_id)
+                continue
+            provider_items = await openai_compatible_upstream.fetch_openai_compatible_models(
+                api_key=provider_api_key,
+                base_url=base_url,
+                created=created,
+                owned_by=f"openai-compatible:{account_id}",
+            )
+            upstream_ids = {item.id for item in provider_items}
+            for item in provider_items:
+                display_id = openai_compatible_upstream.openai_compatible_display_model(
+                    item.id,
+                    upstream_ids,
+                    model_prefix=model_prefix,
+                )
+                if display_id is None:
+                    continue
+                if display_id in seen:
+                    continue
+                if allowed_models is not None and display_id not in allowed_models and item.id not in allowed_models:
+                    continue
+                seen.add(display_id)
+                items.append(_openai_compatible_display_model_item(item, display_id, upstream_ids))
+    return items
+
+
+async def _openai_compatible_codex_catalog_items(
+    api_key: ApiKeyData | None,
+    *,
+    seen_ids: set[str] | None = None,
+) -> tuple[list[CodexModelEntry], list[ModelListItem], bool]:
+    allowed_models = _allowed_models_for_api_key(api_key)
+    seen: set[str] = set(seen_ids or set())
+    entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
+    found_catalog = False
+    encryptor = TokenEncryptor()
+    async with get_background_session() as session:
+        result = await session.execute(
+            select(Account.id, Account.provider_base_url, Account.provider_model_prefix, Account.access_token_encrypted)
+            .where(Account.provider == "openai_compatible")
+            .where(Account.status == AccountStatus.ACTIVE)
+        )
+        for account_id, base_url, model_prefix, access_token_encrypted in result.all():
+            if not base_url or not access_token_encrypted:
+                continue
+            try:
+                provider_api_key = encryptor.decrypt(access_token_encrypted)
+            except Exception:
+                logger.warning("Unable to decrypt OpenAI-compatible account key account_id=%s", account_id)
+                continue
+            provider_catalog = await openai_compatible_upstream.fetch_openai_compatible_codex_models(
+                api_key=provider_api_key,
+                base_url=base_url,
+            )
+            if provider_catalog is None:
+                continue
+            found_catalog = True
+            upstream_ids = {entry.slug for entry in provider_catalog.models} | {
+                item.id for item in provider_catalog.data
+            }
+            data_by_display_id: dict[str, ModelListItem] = {}
+            for item in provider_catalog.data:
+                display_id = openai_compatible_upstream.openai_compatible_display_model(
+                    item.id,
+                    upstream_ids,
+                    model_prefix=model_prefix,
+                )
+                if display_id is None:
+                    continue
+                if allowed_models is not None and display_id not in allowed_models and item.id not in allowed_models:
+                    continue
+                data_by_display_id[display_id] = _namespaced_openai_compatible_model_item(item, display_id)
+            for entry in provider_catalog.models:
+                display_id = openai_compatible_upstream.openai_compatible_display_model(
+                    entry.slug,
+                    upstream_ids,
+                    model_prefix=model_prefix,
+                )
+                if display_id is None:
+                    continue
+                if display_id in seen:
+                    continue
+                if allowed_models is not None and display_id not in allowed_models and entry.slug not in allowed_models:
+                    continue
+                seen.add(display_id)
+                entries.append(_namespaced_openai_compatible_codex_entry(entry, display_id))
+                if entry.visibility == "list" and display_id in data_by_display_id:
+                    data.append(data_by_display_id[display_id])
+    return entries, data, found_catalog
+
+
+def _namespaced_openai_compatible_codex_entry(entry: CodexModelEntry, display_id: str) -> CodexModelEntry:
+    payload = entry.model_dump(mode="json", exclude_none=True)
+    payload["slug"] = display_id
+    payload.setdefault("display_name", display_id)
+    payload.setdefault("description", f"OpenAI-compatible model {display_id}")
+    payload.setdefault("available_in_plans", ["openai-compatible"])
+    return CodexModelEntry.model_validate(payload)
+
+
+def _namespaced_openai_compatible_model_item(item: ModelListItem, display_id: str) -> ModelListItem:
+    payload = item.model_dump(mode="json", exclude_none=True)
+    payload["id"] = display_id
+    payload.setdefault("owned_by", "openai-compatible")
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.setdefault("display_name", display_id)
+        metadata.setdefault("description", f"OpenAI-compatible model {display_id}")
+    return ModelListItem.model_validate(payload)
+
+
+def _openai_compatible_display_model_item(
+    item: ModelListItem,
+    display_id: str,
+    upstream_ids: set[str],
+) -> ModelListItem:
+    payload = item.model_dump(mode="json", exclude_none=True)
+    payload["id"] = display_id
+    payload.setdefault("owned_by", "openai-compatible")
+    context_window = _openai_compatible_context_window(item)
+    payload["metadata"] = {
+        "display_name": display_id,
+        "description": f"OpenAI-compatible model {display_id}",
+        "context_window": context_window,
+        "input_context_window": context_window,
+        "input_modalities": ["text"],
+        "supported_reasoning_levels": [],
+        "supports_parallel_tool_calls": False,
+        "supported_in_api": True,
+        "priority": 0,
+    }
+    payload["context_length"] = context_window
+    payload["contextLength"] = context_window
+    return ModelListItem.model_validate(payload)
+
+
+def _openai_compatible_codex_model_entry(item: ModelListItem) -> CodexModelEntry:
+    speed_tiers = None
+    service_tiers = None
+    if item.metadata is not None:
+        speed_tiers = item.metadata.additional_speed_tiers
+        service_tiers = item.metadata.service_tiers
+    return CodexModelEntry(
+        slug=item.id,
+        display_name=item.id,
+        description=f"OpenAI-compatible model {item.id}",
+        default_reasoning_level="none",
+        supported_reasoning_levels=_codex_reasoning_levels([]),
+        supported_in_api=True,
+        context_window=_openai_compatible_context_window(item),
+        input_modalities=["text"],
+        available_in_plans=["openai-compatible"],
+        visibility="list",
+        additional_speed_tiers=speed_tiers,
+        service_tiers=service_tiers,
+    )
+
+
+def _openai_compatible_context_window(item: ModelListItem) -> int:
+    if item.metadata is not None and item.metadata.context_window:
+        return item.metadata.context_window
+    extra = getattr(item, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("context_window", "context_length", "max_context_window"):
+            value = extra.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+    return 200_000
 
 
 def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
@@ -2211,10 +2433,7 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         description=model.description,
         base_instructions=model.base_instructions,
         default_reasoning_level=model.default_reasoning_level,
-        supported_reasoning_levels=[
-            ReasoningLevelSchema(effort=rl.effort, description=rl.description)
-            for rl in model.supported_reasoning_levels
-        ],
+        supported_reasoning_levels=_codex_reasoning_levels(model.supported_reasoning_levels),
         supported_in_api=model.supported_in_api,
         priority=model.priority,
         minimal_client_version=model.minimal_client_version,
@@ -2229,6 +2448,11 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         visibility=visibility or _model_visibility(model),
         **extra,
     )
+
+
+def _codex_reasoning_levels(levels: Iterable[ReasoningLevel]) -> list[ReasoningLevelSchema]:
+    result = [ReasoningLevelSchema(effort=rl.effort, description=rl.description) for rl in levels]
+    return result or [ReasoningLevelSchema(effort="none", description="No reasoning")]
 
 
 def _effective_context_window(model: UpstreamModel) -> int:
@@ -2507,6 +2731,8 @@ async def _stream_responses(
     )
 
     rate_limit_headers = await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
+    if prefer_http_bridge and await proxy_service_module._openai_compatible_account_ids_for_model(payload.model):
+        prefer_http_bridge = False
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
@@ -2720,7 +2946,10 @@ async def _collect_responses(
         else {}
     )
     payload.stream = True
-    if prefer_http_bridge:
+    openai_compatible_provider = bool(
+        await proxy_service_module._openai_compatible_account_ids_for_model(payload.model)
+    )
+    if prefer_http_bridge and not openai_compatible_provider:
         stream = context.service.stream_http_responses(
             payload,
             request.headers,

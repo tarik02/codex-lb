@@ -708,6 +708,69 @@ async def test_set_and_clear_account_alias(async_client):
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_account_create_and_update_normalizes_provider_root(async_client):
+    create_unprefixed = await async_client.post(
+        "/api/accounts/openai-compatible",
+        json={
+            "name": "Unprefixed provider",
+            "baseUrl": "https://unprefixed.example",
+            "apiKey": "unprefixed-key",
+        },
+    )
+    assert create_unprefixed.status_code == 200
+    unprefixed_account_id = create_unprefixed.json()["accountId"]
+
+    listing = await async_client.get("/api/accounts")
+    matched_unprefixed = next(a for a in listing.json()["accounts"] if a["accountId"] == unprefixed_account_id)
+    assert matched_unprefixed["provider"] == "openai_compatible"
+    assert matched_unprefixed["providerBaseUrl"] == "https://unprefixed.example"
+    assert matched_unprefixed["providerModelPrefix"] is None
+
+    create = await async_client.post(
+        "/api/accounts/openai-compatible",
+        json={
+            "name": "External provider",
+            "baseUrl": " https://provider.example/v1/ ",
+            "apiKey": "initial-key",
+            "modelPrefix": "external",
+        },
+    )
+    assert create.status_code == 200
+    account_id = create.json()["accountId"]
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == account_id)
+    assert matched["provider"] == "openai_compatible"
+    assert matched["providerBaseUrl"] == "https://provider.example"
+    assert matched["providerModelPrefix"] == "external"
+
+    update = await async_client.patch(
+        f"/api/accounts/{account_id}",
+        json={
+            "openaiCompatible": {
+                "name": "Renamed provider",
+                "baseUrl": "https://next.example/v1",
+                "apiKey": "rotated-key",
+                "modelPrefix": "",
+            }
+        },
+    )
+    assert update.status_code == 200
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == account_id)
+    assert matched["email"] == "Renamed provider"
+    assert matched["alias"] == "Renamed provider"
+    assert matched["providerBaseUrl"] == "https://next.example"
+    assert matched["providerModelPrefix"] is None
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert TokenEncryptor().decrypt(account.access_token_encrypted) == "rotated-key"
+
+
+@pytest.mark.asyncio
 async def test_list_accounts_flags_email_duplicates(async_client):
     """Pin codex-lb #787 (B): after a token-invalidation cascade, the
     re-add OAuth flow creates a second account row with the same email

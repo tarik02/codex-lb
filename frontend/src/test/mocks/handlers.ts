@@ -586,9 +586,27 @@ export const handlers = [
     }
     const payload = (await request.json()) as {
       securityWorkAuthorized?: boolean;
+      openaiCompatible?: {
+        name?: string;
+        baseUrl?: string;
+        modelPrefix?: string | null;
+      };
     };
     if (typeof payload.securityWorkAuthorized === "boolean") {
       account.securityWorkAuthorized = payload.securityWorkAuthorized;
+    }
+    if (payload.openaiCompatible) {
+      if (payload.openaiCompatible.name) {
+        account.email = payload.openaiCompatible.name;
+        account.alias = payload.openaiCompatible.name;
+        account.displayName = payload.openaiCompatible.name;
+      }
+      if (payload.openaiCompatible.baseUrl) {
+        account.providerBaseUrl = payload.openaiCompatible.baseUrl;
+      }
+      if ("modelPrefix" in payload.openaiCompatible) {
+        account.providerModelPrefix = payload.openaiCompatible.modelPrefix;
+      }
     }
     return HttpResponse.json({ status: "updated" });
   }),

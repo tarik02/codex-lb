@@ -136,6 +136,8 @@ def _group_by_plan(accounts: list[Account]) -> dict[str, list[Account]]:
     for account in accounts:
         if account.status != AccountStatus.ACTIVE:
             continue
+        if account.provider != "chatgpt":
+            continue
         plan_type = account.plan_type
         if not plan_type:
             continue

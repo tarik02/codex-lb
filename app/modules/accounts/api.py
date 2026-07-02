@@ -42,9 +42,11 @@ from app.modules.accounts.schemas import (
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
+    OpenAICompatibleAccountCreateRequest,
 )
 from app.modules.accounts.service import (
     AccountNotProbableError,
+    AccountProviderUpdateUnsupportedError,
     AccountStateTransitionError,
     AccountUsageResetConsumeUnavailableError,
     AccountUsageResetCreditsUnavailableError,
@@ -229,6 +231,22 @@ async def import_account(
         raise DashboardConflictError(str(exc), code="duplicate_identity_conflict") from exc
 
 
+@router.post("/openai-compatible", response_model=AccountImportResponse)
+async def create_openai_compatible_account(
+    request: Request,
+    payload: OpenAICompatibleAccountCreateRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountImportResponse:
+    response = await context.service.create_openai_compatible_account(payload)
+    AuditService.log_async(
+        "account_created",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": response.account_id, "provider": "openai_compatible"},
+    )
+    return response
+
+
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)
 async def reactivate_account(
     account_id: str,
@@ -253,12 +271,18 @@ async def update_account(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUpdateResponse:
     changed_fields = [field for field, value in payload.model_dump(exclude_unset=True).items() if value is not None]
+    if payload.openai_compatible is not None and not payload.openai_compatible.has_updates():
+        changed_fields = [field for field in changed_fields if field != "openai_compatible"]
     if not changed_fields:
         raise DashboardBadRequestError("No supported account fields to update", code="empty_account_update")
-    success = await context.service.update_account(
-        account_id,
-        security_work_authorized=payload.security_work_authorized,
-    )
+    try:
+        success = await context.service.update_account(
+            account_id,
+            security_work_authorized=payload.security_work_authorized,
+            openai_compatible=payload.openai_compatible,
+        )
+    except AccountProviderUpdateUnsupportedError as exc:
+        raise DashboardBadRequestError(str(exc), code="unsupported_account_update") from exc
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(

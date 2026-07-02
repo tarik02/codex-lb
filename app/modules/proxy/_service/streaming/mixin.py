@@ -57,6 +57,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy import openai_compatible_upstream
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -531,6 +532,28 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
 
         try:
+            if account.provider == "openai_compatible":
+                if not account.provider_base_url:
+                    raise ProxyResponseError(
+                        503,
+                        {
+                            "error": {
+                                "message": "OpenAI-compatible account is missing base URL",
+                                "type": "server_error",
+                                "code": "openai_compatible_account_not_configured",
+                            }
+                        },
+                    )
+                stream = openai_compatible_upstream.stream_openai_compatible_responses(
+                    payload=payload,
+                    headers=headers,
+                    api_key=access_token,
+                    base_url=account.provider_base_url,
+                    model_prefix=account.provider_model_prefix,
+                )
+                async for event_block in stream:
+                    yield event_block
+                return
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
             account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
                 account_id=account.id,

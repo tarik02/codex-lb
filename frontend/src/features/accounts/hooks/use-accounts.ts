@@ -3,6 +3,7 @@ import { useRef } from "react";
 import { toast } from "sonner";
 
 import {
+  createOpenAICompatibleAccount,
   consumeRateLimitResetCredit,
   consumeAccountUsageResetCredit,
   deleteAccount,
@@ -85,6 +86,39 @@ export function useAccountMutations() {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
+    },
+  });
+
+  const createOpenAICompatibleMutation = useMutation({
+    mutationFn: createOpenAICompatibleAccount,
+    onSuccess: () => {
+      toast.success("Account added");
+      void invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Account add failed");
+    },
+  });
+
+  const updateOpenAICompatibleMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      payload,
+    }: {
+      accountId: string;
+      payload: {
+        name?: string;
+        baseUrl?: string;
+        apiKey?: string;
+        modelPrefix?: string | null;
+      };
+    }) => updateAccount(accountId, { openaiCompatible: payload }),
+    onSuccess: (_data, variables) => {
+      toast.success("Account updated");
+      void invalidateAccountRelatedQueries(queryClient, variables.accountId);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Update failed");
     },
   });
 
@@ -242,6 +276,8 @@ export function useAccountMutations() {
 
   return {
     importMutation,
+    createOpenAICompatibleMutation,
+    updateOpenAICompatibleMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
