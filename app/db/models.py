@@ -47,6 +47,11 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class AccountProvider(str, Enum):
+    CHATGPT = "chatgpt"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
 class AccountRoutingPolicy(str, Enum):
     NORMAL = "normal"
     BURN_FIRST = "burn_first"
@@ -75,6 +80,9 @@ class Account(Base):
         nullable=False,
     )
     email: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False, default="chatgpt", server_default=text("'chatgpt'"))
+    provider_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider_model_prefix: Mapped[str | None] = mapped_column(String, nullable=True)
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)

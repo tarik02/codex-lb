@@ -5,6 +5,7 @@ from typing import List
 
 from pydantic import Field, field_validator
 
+from app.core.openai_compatible import normalize_openai_compatible_base_url
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -82,6 +83,9 @@ class AccountAdditionalQuota(DashboardModel):
 class AccountSummary(DashboardModel):
     account_id: str
     chatgpt_account_id: str | None = None
+    provider: str = "chatgpt"
+    provider_base_url: str | None = None
+    provider_model_prefix: str | None = None
     email: str
     alias: str | None = None
     display_name: str
@@ -144,6 +148,83 @@ class AccountImportResponse(DashboardModel):
     status: str
 
 
+class OpenAICompatibleAccountCreateRequest(DashboardModel):
+    name: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(min_length=1, max_length=4000)
+    model_prefix: str | None = Field(default=None, max_length=100)
+
+    @field_validator("name", "api_key")
+    @classmethod
+    def _strip_required_string(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        stripped = normalize_openai_compatible_base_url(value)
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("model_prefix")
+    @classmethod
+    def _normalize_model_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip().strip("/")
+        if not stripped:
+            return None
+        if any(char.isspace() for char in stripped):
+            raise ValueError("model prefix must not contain whitespace")
+        return stripped
+
+
+class OpenAICompatibleAccountUpdateRequest(DashboardModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    api_key: str | None = Field(default=None, min_length=1, max_length=4000)
+    model_prefix: str | None = Field(default=None, max_length=100)
+
+    @field_validator("name", "api_key")
+    @classmethod
+    def _strip_optional_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = normalize_openai_compatible_base_url(value)
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
+
+    @field_validator("model_prefix")
+    @classmethod
+    def _normalize_model_prefix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip().strip("/")
+        if not stripped:
+            return None
+        if any(char.isspace() for char in stripped):
+            raise ValueError("model prefix must not contain whitespace")
+        return stripped
+
+    def has_updates(self) -> bool:
+        return bool(self.model_dump(exclude_unset=True))
+
+
 class OpenCodeOAuthAuth(DashboardModel):
     type: str = "oauth"
     refresh: str
@@ -170,6 +251,7 @@ class AccountOpenCodeAuthExportResponse(DashboardModel):
 
 class AccountUpdateRequest(DashboardModel):
     security_work_authorized: bool | None = None
+    openai_compatible: OpenAICompatibleAccountUpdateRequest | None = None
 
 
 class AccountUpdateResponse(DashboardModel):

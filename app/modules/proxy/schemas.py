@@ -187,6 +187,9 @@ class CodexModelEntry(BaseModel):
     available_in_plans: list[str] = []
     prefer_websockets: bool = False
     visibility: str = "list"
+    additional_speed_tiers: list[str] | None = None
+    service_tiers: list[dict[str, JsonValue]] | None = None
+    default_service_tier: str | None = None
 
 
 class ModelMetadata(BaseModel):

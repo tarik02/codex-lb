@@ -31,6 +31,7 @@ export type AccountListProps = {
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
+  onOpenOpenAICompatible?: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
   readOnly?: boolean;
@@ -42,6 +43,7 @@ export function AccountList({
   onSelect,
   onOpenImport,
   onOpenOauth,
+  onOpenOpenAICompatible = () => {},
   sortMode,
   onSortModeChange,
   readOnly = false,
@@ -173,6 +175,7 @@ export function AccountList({
         onOpenChange={setChooserOpen}
         onImport={onOpenImport}
         onAddAccount={onOpenOauth}
+        onAddOpenAICompatible={onOpenOpenAICompatible}
       />
     </div>
   );

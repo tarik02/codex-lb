@@ -26,6 +26,7 @@ import {
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { cn } from "@/lib/utils";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
@@ -68,6 +69,10 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
   warmup: "Warmup",
   limit_warmup: "Warmup",
 };
+
+function formatPlanLabel(planType: string): string {
+  return planType === "openai_compatible" ? "API" : formatSlug(planType);
+}
 
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
@@ -173,7 +178,7 @@ export function RecentRequestsTable({
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead>
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead>
+              <TableHead className="w-28 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead>
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
               <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
@@ -194,7 +199,7 @@ export function RecentRequestsTable({
               const showRequestedTier =
                 !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
               const planType = request.planType?.trim().toLowerCase() || null;
-              const planLabel = planType ? formatSlug(planType) : "--";
+              const planLabel = planType ? formatPlanLabel(planType) : "--";
               const upstreamTransport = request.upstreamTransport;
 
               return (
@@ -212,11 +217,15 @@ export function RecentRequestsTable({
                       accountLabel
                     )}
                   </TableCell>
-                  <TableCell className="align-top">
+                  <TableCell className="w-28 max-w-28 overflow-hidden align-top">
                     {planType ? (
                       <Badge
                         variant="outline"
-                        className={PLAN_CLASS_MAP[planType] ?? PLAN_CLASS_MAP.free}
+                        title={planLabel}
+                        className={cn(
+                          "block max-w-full overflow-hidden text-ellipsis whitespace-nowrap",
+                          PLAN_CLASS_MAP[planType] ?? PLAN_CLASS_MAP.free,
+                        )}
                       >
                         {planLabel}
                       </Badge>

@@ -26,6 +26,7 @@ import {
   OauthStartRequestSchema,
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
+  OpenAICompatibleAccountCreateRequestSchema,
   RateLimitResetCreditsSnapshotSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
@@ -46,6 +47,13 @@ export function importAccount(file: File) {
   formData.append("auth_json", file);
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
+  });
+}
+
+export function createOpenAICompatibleAccount(payload: unknown) {
+  const validated = OpenAICompatibleAccountCreateRequestSchema.parse(payload);
+  return post(`${ACCOUNTS_BASE_PATH}/openai-compatible`, AccountImportResponseSchema, {
+    body: validated,
   });
 }
 

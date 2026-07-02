@@ -68,6 +68,9 @@ export const AccountAdditionalQuotaSchema = z.object({
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
   chatgptAccountId: z.string().nullable().optional(),
+  provider: z.string().optional(),
+  providerBaseUrl: z.string().nullable().optional(),
+  providerModelPrefix: z.string().nullable().optional(),
   email: z.string(),
   alias: z.string().nullable().optional(),
   displayName: z.string(),
@@ -147,6 +150,20 @@ export const AccountImportResponseSchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   status: z.string(),
+});
+
+export const OpenAICompatibleAccountCreateRequestSchema = z.object({
+  name: z.string().trim().min(1),
+  baseUrl: z.string().trim().min(1),
+  apiKey: z.string().trim().min(1),
+  modelPrefix: z.string().trim().optional(),
+});
+
+export const OpenAICompatibleAccountUpdateRequestSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  baseUrl: z.string().trim().min(1).optional(),
+  apiKey: z.string().trim().min(1).optional(),
+  modelPrefix: z.string().trim().nullable().optional(),
 });
 
 const OpenCodeOAuthAuthSchema = z.object({
@@ -265,6 +282,7 @@ export const AccountRoutingPolicyUpdateResponseSchema = z.object({
 
 export const AccountUpdateRequestSchema = z.object({
   securityWorkAuthorized: z.boolean().optional(),
+  openaiCompatible: OpenAICompatibleAccountUpdateRequestSchema.optional(),
 });
 
 export const OauthStartRequestSchema = z.object({

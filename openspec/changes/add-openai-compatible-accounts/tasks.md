@@ -1,0 +1,6 @@
+- [x] Add database fields for OpenAI-compatible account metadata.
+- [x] Add dashboard flow for creating OpenAI-compatible accounts.
+- [x] Merge provider model discovery into OpenAI and Codex model catalogs.
+- [x] Route prefixed provider model requests to OpenAI-compatible accounts.
+- [x] Exclude OpenAI-compatible accounts from ChatGPT OAuth refresh and usage refresh jobs.
+- [x] Add targeted model catalog and routing tests.

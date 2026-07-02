@@ -504,6 +504,31 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_openai_compatible_account(
+        self,
+        account_id: str,
+        *,
+        name: str | None | object = _UNSET,
+        base_url: str | None | object = _UNSET,
+        api_key_encrypted: str | None | object = _UNSET,
+        model_prefix: str | None | object = _UNSET,
+    ) -> bool:
+        async with sqlite_writer_section():
+            account = await self._session.get(Account, account_id)
+            if account is None or account.provider != "openai_compatible":
+                return False
+            if name is not _UNSET and name is not None:
+                account.email = name
+                account.alias = name
+            if base_url is not _UNSET:
+                account.provider_base_url = base_url
+            if api_key_encrypted is not _UNSET:
+                account.access_token_encrypted = api_key_encrypted
+            if model_prefix is not _UNSET:
+                account.provider_model_prefix = model_prefix
+            await self._session.commit()
+            return True
+
     async def update_status_if_current(
         self,
         account_id: str,

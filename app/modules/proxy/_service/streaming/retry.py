@@ -191,6 +191,14 @@ class _StreamingRetryMixin:
                 upstream_stream_transport,
                 request_id,
             )
+        if await _facade()._openai_compatible_account_ids_for_model(payload.model):
+            upstream_stream_transport = "http"
+            logger.info(
+                "http_downstream_transport_decision policy=openai_compatible "
+                "upstream_stream_transport=http request_id=%s model=%s",
+                request_id,
+                payload.model,
+            )
         if rewritten_file_account_id is None:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)

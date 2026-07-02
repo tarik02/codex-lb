@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.types import JsonValue
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
+from app.modules.proxy import api as proxy_api
+from app.modules.proxy import openai_compatible_upstream
+from app.modules.proxy.schemas import CodexModelEntry, CodexModelsResponse, ModelListItem
 
 pytestmark = pytest.mark.integration
 
@@ -49,6 +57,7 @@ def _make_upstream_model(
     slug: str,
     *,
     supported_in_api: bool = True,
+    supported_reasoning_levels: tuple[ReasoningLevel, ...] | None = None,
     base_instructions: str = "",
     raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
@@ -63,7 +72,9 @@ def _make_upstream_model(
         description=f"Test model {slug}",
         context_window=272000,
         input_modalities=("text", "image"),
-        supported_reasoning_levels=(ReasoningLevel(effort="medium", description="default"),),
+        supported_reasoning_levels=supported_reasoning_levels
+        if supported_reasoning_levels is not None
+        else (ReasoningLevel(effort="medium", description="default"),),
         default_reasoning_level="medium",
         supports_reasoning_summaries=True,
         support_verbosity=False,
@@ -168,6 +179,189 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert auto_review["minimal_client_version"] == "0.98.0"
     assert set(auto_review["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
     assert set(entries["gpt-5.3-codex"]["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_adds_none_reasoning_fallback(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "provider/model-without-reasoning",
+            supported_reasoning_levels=(),
+        )
+    ]
+    await registry.update({"plus": models})
+
+    resp_v1 = await async_client.get("/v1/models")
+    assert resp_v1.status_code == 200
+    v1_entry = next(
+        item for item in resp_v1.json()["data"] if item["id"] == "provider/model-without-reasoning"
+    )
+    assert v1_entry["metadata"]["supported_reasoning_levels"] == []
+
+    resp_codex = await async_client.get("/backend-api/codex/models")
+    assert resp_codex.status_code == 200
+    codex_entry = next(
+        item for item in resp_codex.json()["models"] if item["slug"] == "provider/model-without-reasoning"
+    )
+    assert codex_entry["supported_reasoning_levels"] == [
+        {"effort": "none", "description": "No reasoning"}
+    ]
+
+
+def test_openai_compatible_codex_model_entry_preserves_provider_speed_tiers():
+    entry = proxy_api._openai_compatible_codex_model_entry(
+        ModelListItem(
+            id="external/composer-2.5",
+            created=0,
+            owned_by="openai-compatible",
+            metadata={
+                "display_name": "Composer 2.5",
+                "description": "Composer upstream",
+                "context_window": 200_000,
+                "input_modalities": ["text"],
+                "supported_reasoning_levels": [],
+                "additional_speed_tiers": ["fast"],
+                "service_tiers": [{"id": "priority", "name": "Fast"}],
+            },
+        )
+    )
+
+    assert entry.default_reasoning_level == "none"
+    assert [level.effort for level in entry.supported_reasoning_levels] == ["none"]
+    assert entry.additional_speed_tiers == ["fast"]
+    assert entry.service_tiers == [{"id": "priority", "name": "Fast"}]
+
+
+def test_openai_compatible_codex_model_entry_does_not_synthesize_fast_tier():
+    entry = proxy_api._openai_compatible_codex_model_entry(
+        ModelListItem(id="external/composer-2.5", created=0, owned_by="openai-compatible")
+    )
+
+    assert entry.default_reasoning_level == "none"
+    assert [level.effort for level in entry.supported_reasoning_levels] == ["none"]
+    assert entry.additional_speed_tiers is None
+    assert entry.service_tiers is None
+
+
+def test_openai_compatible_model_prefix_is_configurable():
+    upstream_models = {"model-a", "model-a-fast"}
+
+    assert (
+        openai_compatible_upstream.openai_compatible_display_model(
+            "model-a",
+            upstream_models,
+            model_prefix="external",
+        )
+        == "external/model-a"
+    )
+    assert (
+        openai_compatible_upstream.openai_compatible_display_model(
+            "model-a-fast",
+            upstream_models,
+            model_prefix="external",
+        )
+        == "external/model-a-fast"
+    )
+    assert (
+        openai_compatible_upstream.openai_compatible_upstream_model("external/model-a", model_prefix="external")
+        == "model-a"
+    )
+
+
+def test_openai_compatible_provider_root_is_used_for_upstream_urls():
+    assert (
+        openai_compatible_upstream._openai_compatible_v1_url("https://provider.example/v1/", "models")
+        == "https://provider.example/v1/models"
+    )
+    assert (
+        openai_compatible_upstream._openai_compatible_codex_models_url("https://provider.example/v1/")
+        == "https://provider.example/backend-api/codex/models"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_prefers_provider_codex_catalog(async_client, monkeypatch):
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="external_provider",
+                email="external@example.com",
+                provider="openai_compatible",
+                provider_base_url="https://provider.example",
+                provider_model_prefix="external",
+                plan_type="openai_compatible",
+                access_token_encrypted=encryptor.encrypt("provider-key"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=datetime.now(UTC),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+    async def _fake_fetch_openai_compatible_codex_models(**kwargs):
+        assert kwargs["api_key"] == "provider-key"
+        assert kwargs["base_url"] == "https://provider.example"
+        return CodexModelsResponse(
+            models=[
+                CodexModelEntry(
+                    slug="composer-2.5",
+                    display_name="Composer 2.5",
+                    description="Provider Composer",
+                    default_reasoning_level="none",
+                    supported_reasoning_levels=[{"effort": "none", "description": "No reasoning"}],
+                    context_window=200_000,
+                    input_modalities=["text"],
+                    available_in_plans=["provider"],
+                    additional_speed_tiers=["fast"],
+                    service_tiers=[{"id": "priority", "name": "Fast"}],
+                ),
+                CodexModelEntry(
+                    slug="composer-2.5-fast",
+                    display_name="Composer 2.5 Fast",
+                    description="Hidden upstream variant",
+                    context_window=200_000,
+                    input_modalities=["text"],
+                    available_in_plans=["provider"],
+                ),
+                CodexModelEntry(
+                    slug="gpt-5.5",
+                    display_name="GPT-5.5",
+                    description="Provider GPT-5.5",
+                    default_reasoning_level="none",
+                    supported_reasoning_levels=[{"effort": "none", "description": "No reasoning"}],
+                    context_window=200_000,
+                    input_modalities=["text"],
+                    available_in_plans=["provider"],
+                ),
+            ],
+            data=[
+                ModelListItem(id="composer-2.5", created=0, owned_by="provider"),
+                ModelListItem(id="composer-2.5-fast", created=0, owned_by="provider"),
+                ModelListItem(id="gpt-5.5", created=0, owned_by="provider"),
+            ],
+        )
+
+    monkeypatch.setattr(
+        openai_compatible_upstream,
+        "fetch_openai_compatible_codex_models",
+        _fake_fetch_openai_compatible_codex_models,
+    )
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    payload = resp.json()
+    entries = {entry["slug"]: entry for entry in payload["models"]}
+    data_ids = {item["id"] for item in payload["data"]}
+
+    assert "external/gpt-5.5" in entries
+    assert "external/composer-2.5" in entries
+    assert "external/composer-2.5-fast" in entries
+    assert "external/composer-2.5-fast" in data_ids
+    assert entries["external/composer-2.5"]["additional_speed_tiers"] == ["fast"]
+    assert entries["external/composer-2.5"]["service_tiers"] == [{"id": "priority", "name": "Fast"}]
 
 
 @pytest.mark.asyncio

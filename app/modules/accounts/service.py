@@ -59,6 +59,8 @@ from app.modules.accounts.schemas import (
     AccountUsageResetCreditsResponse,
     CodexAuthJson,
     CodexAuthTokens,
+    OpenAICompatibleAccountCreateRequest,
+    OpenAICompatibleAccountUpdateRequest,
     OpenCodeAuthJson,
     OpenCodeOAuthAuth,
 )
@@ -109,6 +111,10 @@ class AccountUsageResetCreditsUnavailableError(Exception):
 
 class AccountUsageResetConsumeUnavailableError(Exception):
     """Raised when a dashboard account cannot consume upstream reset credits."""
+
+
+class AccountProviderUpdateUnsupportedError(Exception):
+    """Raised when update fields are not supported by the account provider."""
 
 
 class AccountsService:
@@ -528,6 +534,44 @@ class AccountsService:
             status=saved.status,
         )
 
+    async def create_openai_compatible_account(
+        self,
+        payload: OpenAICompatibleAccountCreateRequest,
+    ) -> AccountImportResponse:
+        now = utcnow()
+        account_id = f"openai_compatible_{uuid4().hex[:12]}"
+        account = Account(
+            id=account_id,
+            chatgpt_account_id=None,
+            provider="openai_compatible",
+            provider_base_url=payload.base_url,
+            provider_model_prefix=payload.model_prefix,
+            email=payload.name,
+            alias=payload.name,
+            workspace_id=None,
+            workspace_label="OpenAI-compatible",
+            seat_type=None,
+            plan_type="openai_compatible",
+            access_token_encrypted=self._encryptor.encrypt(payload.api_key),
+            refresh_token_encrypted=self._encryptor.encrypt(""),
+            id_token_encrypted=self._encryptor.encrypt(""),
+            last_refresh=now,
+            status=AccountStatus.ACTIVE,
+            deactivation_reason=None,
+        )
+        saved = await self._repo.upsert(account, merge_by_email=False)
+        clear_account_routing_unavailable(saved.id)
+        get_account_selection_cache().invalidate()
+        return AccountImportResponse(
+            account_id=saved.id,
+            email=saved.email,
+            workspace_id=saved.workspace_id,
+            workspace_label=saved.workspace_label,
+            seat_type=saved.seat_type,
+            plan_type=saved.plan_type,
+            status=saved.status,
+        )
+
     async def _import_usage_refresh_allowed(self, account: Account) -> bool:
         try:
             route = await resolve_upstream_route(
@@ -609,10 +653,29 @@ class AccountsService:
             get_account_selection_cache().invalidate()
         return result
 
-    async def update_account(self, account_id: str, *, security_work_authorized: bool | None = None) -> bool:
+    async def update_account(
+        self,
+        account_id: str,
+        *,
+        security_work_authorized: bool | None = None,
+        openai_compatible: OpenAICompatibleAccountUpdateRequest | None = None,
+    ) -> bool:
         result = False
         if security_work_authorized is not None:
             result = await self._repo.update_security_work_authorized(account_id, security_work_authorized)
+        if openai_compatible is not None and openai_compatible.has_updates():
+            account = await self._repo.get_by_id(account_id)
+            if account is None:
+                return result
+            if account.provider != "openai_compatible":
+                raise AccountProviderUpdateUnsupportedError(
+                    "OpenAI-compatible fields require an OpenAI-compatible account"
+                )
+            update_payload = openai_compatible.model_dump(exclude_unset=True)
+            if "api_key" in update_payload:
+                update_payload["api_key_encrypted"] = self._encryptor.encrypt(update_payload.pop("api_key"))
+            result = await self._repo.update_openai_compatible_account(account_id, **update_payload) or result
+            clear_account_routing_unavailable(account_id)
         if result:
             get_account_selection_cache().invalidate()
         return result

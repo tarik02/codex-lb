@@ -10,6 +10,7 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { OpenAICompatibleAccountDialog } from "@/features/accounts/components/openai-compatible-account-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import {
@@ -24,7 +25,7 @@ import {
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
-import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
+import type { AccountAuthExportResponse, AccountSummary } from "@/features/accounts/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -40,6 +41,8 @@ export function AccountsPage() {
   const {
     accountsQuery,
     importMutation,
+    createOpenAICompatibleMutation,
+    updateOpenAICompatibleMutation,
     pauseMutation,
     resumeMutation,
     setAliasMutation,
@@ -56,6 +59,8 @@ export function AccountsPage() {
   const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
+  const openAICompatibleDialog = useDialogState();
+  const [openAICompatibleEditAccount, setOpenAICompatibleEditAccount] = useState<AccountSummary | null>(null);
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
@@ -110,6 +115,8 @@ export function AccountsPage() {
 
   const mutationBusy =
     importMutation.isPending ||
+    createOpenAICompatibleMutation.isPending ||
+    updateOpenAICompatibleMutation.isPending ||
     pauseMutation.isPending ||
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
@@ -124,6 +131,8 @@ export function AccountsPage() {
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
+    getErrorMessageOrNull(createOpenAICompatibleMutation.error) ||
+    getErrorMessageOrNull(updateOpenAICompatibleMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
@@ -170,6 +179,10 @@ export function AccountsPage() {
               onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
+              onOpenOpenAICompatible={() => {
+                setOpenAICompatibleEditAccount(null);
+                openAICompatibleDialog.show();
+              }}
               readOnly={!canWrite}
             />
           </div>
@@ -216,6 +229,10 @@ export function AccountsPage() {
                 securityWorkAuthorized: enabled,
               })
             }
+            onEditOpenAICompatible={(account) => {
+              setOpenAICompatibleEditAccount(account);
+              openAICompatibleDialog.show();
+            }}
             upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
@@ -234,6 +251,38 @@ export function AccountsPage() {
         onOpenChange={importDialog.onOpenChange}
         onImport={async (file) => {
           await importMutation.mutateAsync(file);
+        }}
+      />
+
+      <OpenAICompatibleAccountDialog
+        open={openAICompatibleDialog.open}
+        account={openAICompatibleEditAccount}
+        busy={createOpenAICompatibleMutation.isPending || updateOpenAICompatibleMutation.isPending}
+        error={
+          getErrorMessageOrNull(createOpenAICompatibleMutation.error) ||
+          getErrorMessageOrNull(updateOpenAICompatibleMutation.error)
+        }
+        onOpenChange={(open) => {
+          openAICompatibleDialog.onOpenChange(open);
+          if (!open) {
+            setOpenAICompatibleEditAccount(null);
+          }
+        }}
+        onSubmit={async (payload) => {
+          if (openAICompatibleEditAccount) {
+            await updateOpenAICompatibleMutation.mutateAsync({
+              accountId: openAICompatibleEditAccount.accountId,
+              payload,
+            });
+            return;
+          }
+          if (!payload.apiKey) {
+            return;
+          }
+          await createOpenAICompatibleMutation.mutateAsync({
+            ...payload,
+            apiKey: payload.apiKey,
+          });
         }}
       />
 
