@@ -4951,7 +4951,7 @@ async def _stream_responses(
             if owns_reservation:
                 await _release_reservation(reservation)
     payload.stream = True
-    if prefer_http_bridge:
+    if bridge_active:
         stream = context.service.stream_http_responses(
             payload,
             effective_headers,
@@ -5090,7 +5090,7 @@ async def _collect_responses(
         else {}
     )
     payload.stream = True
-    if prefer_http_bridge:
+    if bridge_active:
         stream = context.service.stream_http_responses(
             payload,
             request.headers,
