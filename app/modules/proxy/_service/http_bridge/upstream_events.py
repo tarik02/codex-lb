@@ -1041,6 +1041,9 @@ async def _wait_before_http_bridge_model_capacity_retry(
     if request_state is None or not is_upstream_model_capacity_error(error_message):
         return True
 
+    request_state.retry_model_capacity_forever = True
+    request_state.bridge_request_deadline = float("inf")
+
     deadline = request_state.bridge_request_deadline
     if deadline is None:
         deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
@@ -3475,12 +3478,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retry_consumer_attached = False
             if status_request_state.propagate_http_errors and not accepted_lifecycle_replay:
                 _signal_http_bridge_capacity_startup_wait(status_request_state)
-            await self._handle_or_defer_precreated_stream_health(
-                status_request_state,
-                session.account,
-                {"message": retry_error_message or "Upstream error"},
-                retry_error_code,
-            )
+            if not status_request_state.retry_model_capacity_forever:
+                await self._handle_or_defer_precreated_stream_health(
+                    status_request_state,
+                    session.account,
+                    {"message": retry_error_message or "Upstream error"},
+                    retry_error_code,
+                )
             retry_consumer_attached = (
                 retry_consumer_attached
                 and status_request_state.event_queue is not None

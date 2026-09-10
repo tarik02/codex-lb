@@ -1045,6 +1045,9 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    # Selected-model capacity is a provider-wide transient condition. Keep the
+    # request replayable until it succeeds or the client cancels it.
+    retry_model_capacity_forever: bool = False
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.
@@ -1701,7 +1704,7 @@ def _websocket_request_can_replay_before_visible_output(
     # once; a clean close of the replacement socket before its
     # ``response.created`` surfaces one terminal under the visible id instead
     # of a third send (openspec: retry-accepted-output-free-capacity-failures).
-    if request_state.replay_count >= 1 and not (
+    if request_state.replay_count >= 1 and not request_state.retry_model_capacity_forever and not (
         allow_clean_close_retry
         and request_state.replay_count == 1
         and request_state.response_event_count == 0

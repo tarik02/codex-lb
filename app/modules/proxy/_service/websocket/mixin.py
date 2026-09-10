@@ -332,6 +332,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
+    _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _MODEL_OUTPUT_EVENT_TYPES,
     _REQUEST_TRANSPORT_HTTP,
@@ -494,6 +495,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
+    is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -6017,6 +6019,11 @@ class _WebSocketMixin:
                 return downstream_text
             retry_error_code = None
         if retry_error_code is not None:
+            model_capacity_retry = request_state.retry_model_capacity_forever and is_upstream_model_capacity_error(
+                _websocket_event_error_message(event_type, payload)
+            )
+            if model_capacity_retry:
+                await scheduler_for(proxy).sleep(_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS)
             if retry_is_previous_response_not_found:
                 if not (
                     request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
@@ -6066,7 +6073,11 @@ class _WebSocketMixin:
                     # the bridge's owner-bound anchored retry). The dispatch
                     # binding already requires that owner on the reconnect.
                     _prepare_websocket_request_state_for_account_switch(request_state)
-                if accepted_lifecycle_replay and _websocket_accepted_replay_may_exclude_account(request_state):
+                if (
+                    accepted_lifecycle_replay
+                    and not model_capacity_retry
+                    and _websocket_accepted_replay_may_exclude_account(request_state)
+                ):
                     # The accepted turn failed on this account; move the
                     # account-neutral replay to another one like the bridge does.
                     # A replay still pinned to its owner, or whose Codex session
@@ -6081,19 +6092,21 @@ class _WebSocketMixin:
                     # Pre-created replays keep the immediate write; they are not
                     # excluded from the reconnect and rely on the penalty to
                     # steer selection away from this account.
-                    await _record_or_defer_websocket_accepted_replay_health(
-                        proxy,
-                        request_state,
-                        account=account,
-                        error_message=_websocket_event_error_message(event_type, payload),
-                        error_code=retry_error_code,
-                    )
+                    if not model_capacity_retry:
+                        await _record_or_defer_websocket_accepted_replay_health(
+                            proxy,
+                            request_state,
+                            account=account,
+                            error_message=_websocket_event_error_message(event_type, payload),
+                            error_code=retry_error_code,
+                        )
                 else:
-                    await proxy._handle_stream_error(
-                        account,
-                        {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
-                        retry_error_code,
-                    )
+                    if not model_capacity_retry:
+                        await proxy._handle_stream_error(
+                            account,
+                            {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                            retry_error_code,
+                        )
             if retry_error_code is not None:
                 return downstream_text
 

@@ -988,17 +988,24 @@ def _websocket_precreated_retry_error_code(
         return None
     if not request_state.request_text:
         return None
-    if request_state.replay_count >= 1:
-        return None
     if event_type not in {"error", "response.failed"}:
         return None
-
+    error_message = _websocket_event_error_message(event_type, payload)
     error_code = _normalize_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
+    if is_upstream_model_capacity_error(error_message) and error_code not in {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+        "usage_not_included",
+        "quota_exceeded",
+    }:
+        request_state.retry_model_capacity_forever = True
+    if request_state.replay_count >= 1 and not request_state.retry_model_capacity_forever:
+        return None
     error_param = _websocket_event_error_param(event_type, payload)
-    error_message = _websocket_event_error_message(event_type, payload)
     if _facade()._is_previous_response_not_found_error(
         code=error_code,
         param=error_param,

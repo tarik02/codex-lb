@@ -85,7 +85,9 @@ def _websocket_accepted_replay_candidate(
         return False
     if not _websocket_request_is_accepted_lifecycle_only(request_state):
         return False
-    if not request_state.request_text or request_state.replay_count != 0:
+    if not request_state.request_text or (
+        request_state.replay_count != 0 and not request_state.retry_model_capacity_forever
+    ):
         return False
     if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
@@ -234,6 +236,8 @@ def _websocket_accepted_capacity_retry_error_code(
     """
     if event_type not in _TERMINAL_EVENT_TYPES:
         return None
+    if is_upstream_model_capacity_error(error_message) and error_code not in _ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES:
+        request_state.retry_model_capacity_forever = True
     if not _websocket_accepted_replay_candidate(request_state, has_other_pending_requests=has_other_pending_requests):
         return None
     if payload_response_id is not None and payload_response_id != request_state.response_id:

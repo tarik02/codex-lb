@@ -3772,7 +3772,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
-        if request_state.replay_count >= 1:
+        if request_state.replay_count >= 1 and not request_state.retry_model_capacity_forever:
             return False
         if request_state.response_event_count > 0:
             return False
@@ -3934,14 +3934,14 @@ class _HTTPBridgeRequestSubmitMixin:
                         and not candidate.proxy_injected_previous_response_id
                         and not candidate.file_required_preferred_account
                         and candidate.response_event_count == 0
-                        and candidate.replay_count == 0
+                        and (candidate.replay_count == 0 or candidate.retry_model_capacity_forever)
                     )
                     proof_gated_continuity_replay_candidate = (
                         candidate.previous_response_id is not None
                         and candidate.fresh_upstream_request_is_retry_safe
                         and bool(candidate.fresh_upstream_request_text)
                         and candidate.response_event_count == 0
-                        and candidate.replay_count == 0
+                        and (candidate.replay_count == 0 or candidate.retry_model_capacity_forever)
                     )
         if not await self._http_bridge_precreated_retry_allowed(
             session,
@@ -4040,7 +4040,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 and request_state.response_event_count == 0
                 and request_state.clean_close_replay_count < clean_close_retry_max_count
             )
-            if request_state.replay_count >= 1 and not additional_clean_close_retry:
+            if (
+                request_state.replay_count >= 1
+                and not request_state.retry_model_capacity_forever
+                and not additional_clean_close_retry
+            ):
                 return False
             account_bound_replay = False
             if request_state.previous_response_id is not None:
@@ -4105,8 +4109,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         # is the only account selection can return, so the
                         # exclusion would spin on ``hard_affinity_saturated``
                         # until the bridge request budget ran out.
-                        if model_fallback_replay or _http_bridge_accepted_replay_may_exclude_account(
-                            request_state, session
+                        if (
+                            not request_state.retry_model_capacity_forever
+                            and (
+                                model_fallback_replay
+                                or _http_bridge_accepted_replay_may_exclude_account(request_state, session)
+                            )
                         ):
                             request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
