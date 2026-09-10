@@ -420,6 +420,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     token = set_request_id(request_state.archive_request_id)
     try:
         request_state.response_create_attempt_count += 1
+        request_state.retry_model_capacity_forever = False
         attempt = _HTTPBridgeResponseCreateAttempt(ordinal=request_state.response_create_attempt_count)
         request_state.response_create_attempt = attempt
         request_state.response_create_sent_at = clock.monotonic()
@@ -4136,12 +4137,9 @@ class _HTTPBridgeRequestSubmitMixin:
                         # is the only account selection can return, so the
                         # exclusion would spin on ``hard_affinity_saturated``
                         # until the bridge request budget ran out.
-                        if (
-                            not request_state.retry_model_capacity_forever
-                            and (
-                                model_fallback_replay
-                                or _http_bridge_accepted_replay_may_exclude_account(request_state, session)
-                            )
+                        if not request_state.retry_model_capacity_forever and (
+                            model_fallback_replay
+                            or _http_bridge_accepted_replay_may_exclude_account(request_state, session)
                         ):
                             request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:

@@ -1091,6 +1091,15 @@ async def _process_and_forward_upstream_websocket_text(
     upstream_control.downstream_texts = None
     upstream_control.downstream_sequence_request_state = None
     upstream_control.downstream_sequence_number = None
+    if (
+        not suppress_downstream_event
+        and downstream_sequence_request_state is not None
+        and downstream_sequence_request_state.deferred_lifecycle_downstream_texts
+    ):
+        downstream_texts = downstream_sequence_request_state.deferred_lifecycle_downstream_texts + (
+            downstream_texts if downstream_texts is not None else [downstream_text]
+        )
+        downstream_sequence_request_state.deferred_lifecycle_downstream_texts = []
     if downstream_texts is not None:
         for emitted_text in downstream_texts:
             try:
@@ -1128,6 +1137,8 @@ async def _process_and_forward_upstream_websocket_text(
                 break
         if downstream_activity.disconnected:
             return True
+        if downstream_sequence_request_state is not None and downstream_sequence_number is not None:
+            downstream_sequence_request_state.last_downstream_sequence_number = downstream_sequence_number
     elif not suppress_downstream_event:
         try:
             await proxy._send_downstream_websocket_text(
@@ -2798,6 +2809,7 @@ class _WebSocketMixin:
                                     ),
                                 )
                             request_state.response_create_sent_at = clock.monotonic()
+                            request_state.retry_model_capacity_forever = False
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -5600,12 +5612,21 @@ class _WebSocketMixin:
                 if payload is not None:
                     rewritten_payload = _rewrite_websocket_downstream_response_id(payload, request_state)
                     if rewritten_payload is not payload:
-                        payload = rewritten_payload
-                        text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                        text = json.dumps(rewritten_payload, ensure_ascii=True, separators=(",", ":"))
                     sequence_number = parsed_frame.sequence_number
-                    if sequence_number is not None:
-                        upstream_control.downstream_sequence_request_state = request_state
-                        upstream_control.downstream_sequence_number = sequence_number
+                    upstream_control.downstream_sequence_request_state = request_state
+                    upstream_control.downstream_sequence_number = sequence_number
+                    if (
+                        event_type in {"response.created", "response.in_progress"}
+                        and sequence_number is not None
+                        and not request_state.generate_false_prewarm
+                        and request_state.last_downstream_sequence_number is None
+                        and not request_state.upstream_model_output_seen
+                        and len(request_state.deferred_lifecycle_downstream_texts) < 2
+                        and not upstream_control.suppress_downstream_event
+                    ):
+                        request_state.deferred_lifecycle_downstream_texts.append(text)
+                        upstream_control.suppress_downstream_event = True
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -6022,8 +6043,6 @@ class _WebSocketMixin:
             model_capacity_retry = request_state.retry_model_capacity_forever and is_upstream_model_capacity_error(
                 _websocket_event_error_message(event_type, payload)
             )
-            if model_capacity_retry:
-                await scheduler_for(proxy).sleep(_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS)
             if retry_is_previous_response_not_found:
                 if not (
                     request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
@@ -6108,6 +6127,8 @@ class _WebSocketMixin:
                             retry_error_code,
                         )
             if retry_error_code is not None:
+                if model_capacity_retry:
+                    await scheduler_for(proxy).sleep(_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS)
                 return downstream_text
 
         completed_usage = (

@@ -1278,6 +1278,7 @@ class _WebSocketRequestState:
     # confirms.
     deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
+    deferred_lifecycle_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     # Armed together with the created suppression when the client already saw
     # ``response.in_progress`` from the failed attempt, so the replay's
@@ -1704,12 +1705,16 @@ def _websocket_request_can_replay_before_visible_output(
     # once; a clean close of the replacement socket before its
     # ``response.created`` surfaces one terminal under the visible id instead
     # of a third send (openspec: retry-accepted-output-free-capacity-failures).
-    if request_state.replay_count >= 1 and not request_state.retry_model_capacity_forever and not (
-        allow_clean_close_retry
-        and request_state.replay_count == 1
-        and request_state.response_event_count == 0
-        and request_state.clean_close_replay_count == 0
-        and request_state.replay_downstream_response_id is None
+    if (
+        request_state.replay_count >= 1
+        and not request_state.retry_model_capacity_forever
+        and not (
+            allow_clean_close_retry
+            and request_state.replay_count == 1
+            and request_state.response_event_count == 0
+            and request_state.clean_close_replay_count == 0
+            and request_state.replay_downstream_response_id is None
+        )
     ):
         return False
     # A sequenced downstream frame pins the request to its socket: a fresh

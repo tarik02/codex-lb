@@ -1042,7 +1042,9 @@ async def _wait_before_http_bridge_model_capacity_retry(
         return True
 
     request_state.retry_model_capacity_forever = True
-    request_state.bridge_request_deadline = float("inf")
+    request_state.bridge_request_deadline = clock.monotonic() + _http_bridge_request_budget_seconds(
+        _service_get_settings()
+    )
 
     deadline = request_state.bridge_request_deadline
     if deadline is None:
@@ -2782,8 +2784,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # object, so those (rare, per-item) events are always
                     # re-serialized. Every other pre-framing step is read-only.
                     if rewritten_payload is not payload or event_type == "response.output_item.done":
-                        payload = rewritten_payload
-                        event_block = format_sse_event(payload)
+                        event_block = format_sse_event(rewritten_payload)
                     else:
                         # Identity fast path: nothing changed, so frame the
                         # upstream JSON text instead of serializing the dict again.
@@ -2813,6 +2814,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state is not None
                     and early_retry_error_code is not None
                     and early_retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                    and matched_request_state.retry_model_capacity_forever
                     and not is_previous_response_not_found_event
                     and is_upstream_model_capacity_error(error_message)
                     and _websocket_request_can_replay_before_visible_output(matched_request_state)
@@ -3418,6 +3420,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             and not is_previous_response_not_found_event
             and status_request_state is not None
+            and status_request_state.retry_model_capacity_forever
             and is_upstream_model_capacity_error(retry_error_message)
             and _websocket_request_can_replay_before_visible_output(status_request_state)
             and _http_bridge_accepted_capacity_retry_allowed(status_request_state)

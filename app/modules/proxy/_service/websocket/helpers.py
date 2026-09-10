@@ -959,6 +959,19 @@ def _websocket_precreated_retry_error_code(
 ) -> str | None:
     if request_state is None:
         return None
+    if event_type in {"error", "response.failed"}:
+        request_state.retry_model_capacity_forever = is_upstream_model_capacity_error(
+            _websocket_event_error_message(event_type, payload)
+        ) and _normalize_error_code(
+            _websocket_event_error_code(event_type, payload),
+            _websocket_event_error_type(event_type, payload),
+        ) not in {
+            "rate_limit_exceeded",
+            "usage_limit_reached",
+            "insufficient_quota",
+            "usage_not_included",
+            "quota_exceeded",
+        }
     if request_state.response_id is not None and not request_state.awaiting_response_created:
         # An accepted response is only replayable under the output-free
         # capacity rule; every pre-created classifier below refuses it.
@@ -995,14 +1008,6 @@ def _websocket_precreated_retry_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
-    if is_upstream_model_capacity_error(error_message) and error_code not in {
-        "rate_limit_exceeded",
-        "usage_limit_reached",
-        "insufficient_quota",
-        "usage_not_included",
-        "quota_exceeded",
-    }:
-        request_state.retry_model_capacity_forever = True
     if request_state.replay_count >= 1 and not request_state.retry_model_capacity_forever:
         return None
     error_param = _websocket_event_error_param(event_type, payload)

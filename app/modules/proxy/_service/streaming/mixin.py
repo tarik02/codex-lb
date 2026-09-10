@@ -72,6 +72,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.accepted_replay import _terminal_payload_reports_output
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -271,6 +272,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.streaming.helpers import (
+    _MODEL_CAPACITY_LIMIT_CODES,
     _classify_terminal_stream_error_frame,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
@@ -305,6 +307,7 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
+    _TransientStreamError,
     _ttft_event_latency_ms,
     _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
@@ -411,6 +414,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
+    is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -522,6 +526,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = terminal_event_seen = suppressed_duplicate_tool_call = False
+        deferred_lifecycle_lines: list[str] = []
         latency_first_token_ms: int | None = None
         ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:
@@ -697,6 +702,14 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.error = _upstream_error_from_openai(error)
                 upstream_error: UpstreamError = settlement.error or cast(UpstreamError, {"message": "Upstream error"})
                 settlement.record_success = False
+                if (
+                    is_upstream_model_capacity_error(raw_error_message)
+                    and code not in _MODEL_CAPACITY_LIMIT_CODES
+                    and not _terminal_payload_reports_output(first_payload)
+                    and tool_call_response_id_from_payload(first_payload) is None
+                ):
+                    settlement.account_health_error = False
+                    raise _TransientStreamError(code, upstream_error)
                 if rewritten_error is not None:
                     rewritten_code, rewritten_message, upstream_error_code = rewritten_error
                     first, event, first_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
@@ -778,10 +791,16 @@ class _StreamingMixin(_StreamingRetryMixin):
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
-                    settlement.downstream_visible = True
-                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                        settlement.downstream_text_visible = True
-                    yield first
+                    if event_type in {
+                        "response.created",
+                        "response.in_progress",
+                    } and not _terminal_payload_reports_output(first_payload):
+                        deferred_lifecycle_lines.append(first)
+                    else:
+                        settlement.downstream_visible = True
+                        if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                            settlement.downstream_text_visible = True
+                        yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
@@ -790,6 +809,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                     if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         saw_text_delta = settlement.downstream_text_visible = True
                     settlement.downstream_visible = True
+                    for prelude in deferred_lifecycle_lines:
+                        yield prelude
+                    deferred_lifecycle_lines.clear()
                     yield line
                     continue
                 event_payload = parse_sse_data_json(line)
@@ -845,6 +867,19 @@ class _StreamingMixin(_StreamingRetryMixin):
                         raw_error_code = _classify_terminal_stream_error_frame(
                             event_type, event_payload, raw_error_code, raw_error_message
                         )
+                        if (
+                            not settlement.downstream_visible
+                            and is_upstream_model_capacity_error(raw_error_message)
+                            and raw_error_code not in _MODEL_CAPACITY_LIMIT_CODES
+                            and not _terminal_payload_reports_output(event_payload)
+                            and tool_call_response_id_from_payload(event_payload) in {None, settlement.response_id}
+                        ):
+                            error_code = raw_error_code
+                            error_message = raw_error_message
+                            settlement.error = upstream_error
+                            settlement.record_success = False
+                            settlement.account_health_error = False
+                            raise _TransientStreamError(raw_error_code, upstream_error)
                         rewritten_error = _facade()._rewrite_previous_response_stream_error(
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
@@ -943,7 +978,18 @@ class _StreamingMixin(_StreamingRetryMixin):
                     continue
                 if event_payload is not None and not preserve_raw_sse_line:
                     line = format_sse_event(event_payload)
+                if (
+                    event_type in {"response.created", "response.in_progress"}
+                    and not settlement.downstream_visible
+                    and len(deferred_lifecycle_lines) < 2
+                    and not _terminal_payload_reports_output(event_payload)
+                ):
+                    deferred_lifecycle_lines.append(line)
+                    continue
                 settlement.downstream_visible = True
+                for prelude in deferred_lifecycle_lines:
+                    yield prelude
+                deferred_lifecycle_lines.clear()
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
                 terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
@@ -1004,7 +1050,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 )
             )
             return
-        except _TerminalStreamError:
+        except (_TerminalStreamError, _TransientStreamError):
             raise
         except (asyncio.CancelledError, GeneratorExit):
             if not terminal_event_seen:

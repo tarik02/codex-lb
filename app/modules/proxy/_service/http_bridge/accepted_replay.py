@@ -236,8 +236,9 @@ def _websocket_accepted_capacity_retry_error_code(
     """
     if event_type not in _TERMINAL_EVENT_TYPES:
         return None
-    if is_upstream_model_capacity_error(error_message) and error_code not in _ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES:
-        request_state.retry_model_capacity_forever = True
+    request_state.retry_model_capacity_forever = (
+        is_upstream_model_capacity_error(error_message) and error_code not in _ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES
+    )
     if not _websocket_accepted_replay_candidate(request_state, has_other_pending_requests=has_other_pending_requests):
         return None
     if payload_response_id is not None and payload_response_id != request_state.response_id:
@@ -321,6 +322,11 @@ async def _stage_websocket_request_state_for_replay(
         request_state.suppress_next_created_downstream = True
         request_state.suppress_next_in_progress_downstream = request_state.response_event_count >= 2
         request_state.response_create_admission_reacquire_required = True
+        if request_state.deferred_lifecycle_downstream_texts:
+            request_state.deferred_lifecycle_downstream_texts.clear()
+            request_state.replay_downstream_response_id = None
+            request_state.suppress_next_created_downstream = False
+            request_state.suppress_next_in_progress_downstream = False
         logger.info(
             "Accepted output-free replay staged request_id=%s surface=%s trigger=%s visible_response_id=%s events=%d",
             request_state.request_log_id or request_state.request_id,

@@ -2385,11 +2385,23 @@ class _StreamingRetryMixin:
                                 else _upstream_error_from_openai(_parse_openai_error(tex.payload))
                             )
                             capacity_error_message = str(capacity_error_payload.get("message") or "")
-                            if is_upstream_model_capacity_error(capacity_error_message):
+                            capacity_error_code = (
+                                tex.code
+                                if isinstance(tex, _TransientStreamError)
+                                else _normalize_error_code(
+                                    capacity_error_payload.get("code"), capacity_error_payload.get("type")
+                                )
+                            )
+                            if is_upstream_model_capacity_error(capacity_error_message) and capacity_error_code not in {
+                                "rate_limit_exceeded",
+                                "usage_limit_reached",
+                                "insufficient_quota",
+                                "usage_not_included",
+                                "quota_exceeded",
+                            }:
                                 # This is a provider-wide model condition, not an
                                 # account failure. Keep the request open and retry
                                 # until the model accepts it or the client cancels.
-                                deadline = float("inf")
                                 _facade().logger.info(
                                     "Selected model at capacity; retrying indefinitely "
                                     "request_id=%s model=%s account_id=%s",
@@ -2410,6 +2422,9 @@ class _StreamingRetryMixin:
                                     clock=clock,
                                 ):
                                     yield wait_event
+                                deadline = clock.monotonic() + _facade()._stream_request_budget_seconds(
+                                    base_settings, request_transport=request_transport
+                                )
                                 continue
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
                                 error = _parse_openai_error(tex.payload)
