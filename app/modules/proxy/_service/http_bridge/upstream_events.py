@@ -3501,6 +3501,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ):
                     await _release_http_bridge_model_capacity_retry_admission(status_request_state)
                     status_request_state.awaiting_response_created = True
+                status_request_state.model_capacity_retry_count += 1
+                logger.info(
+                    "Selected model at capacity; retrying indefinitely "
+                    "request_id=%s model=%s account_id=%s surface=http_bridge "
+                    "capacity_retry_attempt=%d elapsed_seconds=%.1f retry_delay_seconds=%.1f",
+                    status_request_state.request_log_id or status_request_state.request_id,
+                    status_request_state.model,
+                    session.account.id,
+                    status_request_state.model_capacity_retry_count,
+                    clock.monotonic() - status_request_state.started_at,
+                    _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
+                )
                 retry_after_wait = await _wait_before_http_bridge_model_capacity_retry(
                     status_request_state,
                     emit_keepalives=not status_request_state.propagate_http_errors,

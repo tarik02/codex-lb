@@ -1048,6 +1048,7 @@ class _WebSocketRequestState:
     # Selected-model capacity is a provider-wide transient condition. Keep the
     # request replayable until it succeeds or the client cancels it.
     retry_model_capacity_forever: bool = False
+    model_capacity_retry_count: int = 0
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.

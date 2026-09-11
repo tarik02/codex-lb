@@ -6128,6 +6128,18 @@ class _WebSocketMixin:
                         )
             if retry_error_code is not None:
                 if model_capacity_retry:
+                    request_state.model_capacity_retry_count += 1
+                    _facade().logger.info(
+                        "Selected model at capacity; retrying indefinitely "
+                        "request_id=%s model=%s account_id=%s surface=websocket "
+                        "capacity_retry_attempt=%d elapsed_seconds=%.1f retry_delay_seconds=%.1f",
+                        request_state.request_log_id or request_state.request_id,
+                        request_state.model,
+                        account.id,
+                        request_state.model_capacity_retry_count,
+                        clock_for(proxy).monotonic() - request_state.started_at,
+                        _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
+                    )
                     await scheduler_for(proxy).sleep(_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS)
                 return downstream_text
 

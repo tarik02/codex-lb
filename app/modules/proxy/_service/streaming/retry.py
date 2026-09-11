@@ -344,6 +344,7 @@ class _StreamingRetryMixin:
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = ensure_request_id()
         start = clock.monotonic()
+        model_capacity_retry_count = 0
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
         # C2-3 resilience toggles: resolved from this request's snapshot and
@@ -2402,12 +2403,17 @@ class _StreamingRetryMixin:
                                 # This is a provider-wide model condition, not an
                                 # account failure. Keep the request open and retry
                                 # until the model accepts it or the client cancels.
+                                model_capacity_retry_count += 1
                                 _facade().logger.info(
                                     "Selected model at capacity; retrying indefinitely "
-                                    "request_id=%s model=%s account_id=%s",
+                                    "request_id=%s model=%s account_id=%s surface=streaming "
+                                    "capacity_retry_attempt=%d elapsed_seconds=%.1f retry_delay_seconds=%.1f",
                                     request_id,
                                     payload.model,
                                     account.id,
+                                    model_capacity_retry_count,
+                                    clock.monotonic() - start,
+                                    _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS,
                                 )
                                 async for wait_event in _iter_account_capacity_recovery_wait(
                                     request_id=request_id,
